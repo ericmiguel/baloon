@@ -1,236 +1,199 @@
-"""Command-line interface for Baloon.
+"""Command-line interface for Baloon geospatial format converter.
 
-Provides a modern Typer-based CLI with Rich output formatting for converting
-geospatial polygon files between formats like BLN, Shapefile, GeoJSON, and SVG.
-
-The CLI supports single file conversion, batch directory processing, file inspection,
-and format discovery with beautifully formatted output tables.
+This module provides a Typer-based CLI for converting between various
+geospatial file formats including BLN, Shapefile, GeoJSON, KML,
+GeoPackage, and SVG.
 """
 
-import logging
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Annotated
 
-import typer
 from rich.console import Console
-from rich.logging import RichHandler
-from rich.table import Table
+from rich.progress import track
+import typer
 
-from . import __version__
-from .core import BLNParseError, convert_path, parse_bln
-from .formats import list_formats, load_any, write_any
+from baloon.core import convert_file
+from baloon.exceptions import BaloonError
 
+
+app = typer.Typer(
+    name="baloon",
+    help="Convert a geospatial file from one format to another",
+    no_args_is_help=True,
+)
 console = Console()
-app = typer.Typer(help="Baloon - Convert BLN polygon files to modern geospatial formats.")
 
 
-def _configure_logging(verbosity: int) -> None:
-    """Configure Rich logging based on verbosity level.
-
-    Parameters
-    ----------
-    verbosity : int
-        Verbosity level: 0=WARNING, 1=INFO, 2+=DEBUG
-    """
-    level = logging.WARNING
-    if verbosity == 1:
-        level = logging.INFO
-    elif verbosity >= 2:
-        level = logging.DEBUG
-    logging.basicConfig(
-        level=level,
-        format="%(message)s",
-        handlers=[RichHandler(rich_tracebacks=True, show_time=False, show_path=False)],
-    )
-
-
-@app.callback()
-def _main(
-    ctx: typer.Context,
-    verbose: Annotated[
-        int, typer.Option("-v", "--verbose", count=True, help="Increase verbosity (-v, -vv).")
-    ] = 0,
-    version: Annotated[bool, typer.Option("--version", help="Show version and exit.")] = False,
+@app.callback(invoke_without_command=True)
+def main(
+    input_path: Annotated[
+        Path,
+        typer.Argument(help="Input file path", show_default=False),
+    ],
+    output_path: Annotated[
+        Path,
+        typer.Argument(help="Output file path", show_default=False),
+    ],
+    input_format: Annotated[
+        str | None,
+        typer.Option(
+            "--input-format",
+            "-i",
+            help="Input format (auto-detected if not specified)",
+        ),
+    ] = None,
+    output_format: Annotated[
+        str | None,
+        typer.Option(
+            "--output-format",
+            "-o",
+            help="Output format (detected from extension if not specified)",
+        ),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option("--overwrite", help="Overwrite output file if it exists"),
+    ] = False,
 ) -> None:
-    """Main callback for global options."""
-    if version:
-        console.print(f"baloon version [bold]{__version__}[/bold]")
-        raise typer.Exit()
-    _configure_logging(verbose)
-    ctx.ensure_object(dict)
+    """Convert a geospatial file from one format to another.
 
-
-@app.command("convert")
-def convert_cmd(
-    input_path: Annotated[Path, typer.Argument(help="Input file (BLN / SHP / GeoJSON)")],
-    to: Annotated[list[str] | None, typer.Option("-t", "--to", help="Target format(s)")] = None,
-    out_dir: Annotated[Path | None, typer.Option("-o", "--out", help="Output directory")] = None,
-) -> None:
-    """Convert a single file to one or more target formats.
-
-    Supports conversion between BLN, Shapefile, GeoJSON, and SVG formats.
-    Auto-detects input format from file extension and creates output files
-    with the specified target extensions.
-
-    Examples:
-        baloon convert boundary.bln --to geojson svg
-        baloon convert data.geojson --to shp --out ./output/
+    Supports BLN (read-only), Shapefile, GeoJSON, KML, GeoPackage (GPKG), and SVG (write-only).
     """
-    if to is None:
-        to = ["geojson"]
-
-    if not input_path.exists():
-        console.print(f"[red]Error[/red]: Input file not found: {input_path}")
-        raise typer.Exit(1)
-
-    # Load input file using format registry
     try:
-        gdf = load_any(input_path)
-    except Exception as e:
-        console.print(f"[red]Error[/red]: Failed to load {input_path.name}: {e}")
-        raise typer.Exit(1) from e
+        # Directory batch conversion path
+        if input_path.is_dir():
+            if output_format is None:
+                console.print(
+                    "❌ When input is a directory, please specify --output-format (e.g., geojson).",
+                    style="red",
+                )
+                raise typer.Exit(2)
 
-    # Set up output directory
-    out_directory = out_dir or input_path.parent
-    out_directory.mkdir(parents=True, exist_ok=True)
+            target_dir = output_path
+            if target_dir.exists() and not target_dir.is_dir():
+                console.print(
+                    f"❌ Output path '{target_dir}' must be a directory when converting a folder.",
+                    style="red",
+                )
+                raise typer.Exit(2)
+            target_dir.mkdir(parents=True, exist_ok=True)
 
-    # Convert to each target format
-    table = Table(title=f"Converting {input_path.name}")
-    table.add_column("Output", style="cyan")
-    table.add_column("Status", style="green")
+            # Pre-scan files to warn and build conversion list
+            from baloon.exceptions import (
+                FormatNotSupportedError as FormatNotSupportedError,
+            )
+            from baloon.formats import detect_format as _detect_format
 
-    for fmt in to:
-        ext = fmt.lower()
-        out_path = out_directory / f"{input_path.stem}.{ext}"
-        try:
-            write_any(gdf, out_path, ext)
-            table.add_row(str(out_path), "✓ Success")
-        except Exception as e:
-            table.add_row(str(out_path), f"✗ Error: {e}")
+            files_to_convert: list[tuple[Path, Path]] = []
+            unsupported_count = 0
+            write_only_count = 0
 
-    console.print(table)
+            for file in input_path.glob("**/*"):
+                if not file.is_file():
+                    continue
+                try:
+                    handler = _detect_format(file)
+                except FormatNotSupportedError:
+                    unsupported_count += 1
+                    console.print(
+                        f"⚠️ Skipping unsupported file: {file}", style="yellow"
+                    )
+                    continue
+                if not handler.reader:
+                    write_only_count += 1
+                    console.print(
+                        f"⚠️ Skipping write-only format '{handler.name}': {file}",
+                        style="yellow",
+                    )
+                    continue
+                rel_path = file.relative_to(input_path)
+                out_file = target_dir / rel_path.with_suffix(f".{output_format}")
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+                files_to_convert.append((file, out_file))
 
+            if not files_to_convert:
+                console.print("No convertible files found.", style="yellow")
+                # Still exit success (nothing to do)
+                return
 
-@app.command("batch")
-def batch_cmd(
-    folder: Annotated[Path, typer.Argument(help="Folder containing BLN files")],
-    to: Annotated[str, typer.Option("-t", "--to", help="Target format")] = "geojson",
-    out_dir: Annotated[Path | None, typer.Option("-o", "--out", help="Output directory")] = None,
-) -> None:
-    """Convert all BLN files in a directory to the target format.
+            console.print(
+                f"Converting directory '{input_path}' to '{output_format}' into '{target_dir}'..."
+            )
 
-    Recursively processes all .bln files in the specified directory,
-    preserving the directory structure in the output.
+            for src, dst in track(files_to_convert, description="Converting..."):
+                convert_file(src, dst)
 
-    Examples:
-        baloon batch ./data/ --to geojson
-        baloon batch ./boundaries/ --to svg --out ./svg_output/
-    """
-    if not folder.exists() or not folder.is_dir():
-        console.print(f"[red]Error[/red]: Directory not found: {folder}")
-        raise typer.Exit(1)
+            console.print(
+                f"✓ Successfully converted {len(files_to_convert)} file(s) to '{target_dir}'",
+                style="green",
+            )
+            return
 
-    # Find all BLN files
-    bln_files = list(folder.glob("**/*.bln"))
-    if not bln_files:
-        console.print(f"[yellow]Warning[/yellow]: No BLN files found in {folder}")
-        return
+        # Single-file conversion path
+        # Check if output file exists and overwrite is not set
+        if output_path.exists() and not overwrite:
+            console.print(
+                f"❌ Output file '{output_path}' already exists. Use --overwrite to replace it.",
+                style="red",
+            )
+            raise typer.Exit(2)
 
-    table = Table(title=f"Batch Converting {len(bln_files)} BLN files")
-    table.add_column("File", style="cyan")
-    table.add_column("Status", style="green")
+        # Detect formats if not specified
+        if input_format is None:
+            try:
+                from baloon.formats import detect_format as _detect_format
 
-    success_count = 0
-    for bln_file in bln_files:
-        try:
-            convert_path(bln_file, to, out_dir)
-            table.add_row(bln_file.name, "✓ Converted")
-            success_count += 1
-        except Exception as e:
-            table.add_row(bln_file.name, f"✗ {e}")
+                handler = _detect_format(input_path)
+                input_format = handler.name
+                console.print(f"Detected input format: {input_format}")
+            except Exception as e:
+                from baloon.exceptions import (
+                    FormatNotSupportedError as FormatNotSupportedError,
+                )
 
-    console.print(table)
-    console.print(f"\n[green]Converted {success_count}/{len(bln_files)} files successfully[/green]")
+                if isinstance(e, FormatNotSupportedError):
+                    console.print(f"❌ Unsupported input format: {e}", style="red")
+                    raise typer.Exit(2) from e
+                raise
 
+        if output_format is None:
+            try:
+                from baloon.formats import detect_format as _detect_format
 
-@app.command("formats")
-def formats_cmd() -> None:
-    """List all supported file formats.
+                handler = _detect_format(output_path)
+                output_format = handler.name
+                console.print(f"Detected output format: {output_format}")
+            except Exception as e:
+                from baloon.exceptions import (
+                    FormatNotSupportedError as FormatNotSupportedError,
+                )
 
-    Shows which formats can be read from and written to, along with
-    descriptions of each format's capabilities.
-    """
-    table = Table(title="Supported File Formats")
-    table.add_column("Format", style="bold")
-    table.add_column("Extensions", style="cyan")
-    table.add_column("Read", justify="center")
-    table.add_column("Write", justify="center")
-    table.add_column("Description")
+                if isinstance(e, FormatNotSupportedError):
+                    console.print(f"❌ Unsupported output format: {e}", style="red")
+                    raise typer.Exit(2) from e
+                raise
 
-    for handler in list_formats():
-        exts = ", ".join(f".{ext}" for ext in handler.extensions)
-        read_mark = "✓" if handler.reader else "✗"
-        write_mark = "✓" if handler.writer else "✗"
-
-        table.add_row(
-            handler.name, exts, read_mark, write_mark, handler.description or "No description"
+        # Perform conversion with progress tracking
+        console.print(
+            f"Converting '{input_path}' ({input_format}) to '{output_path}' ({output_format})..."
         )
-    console.print(table)
 
+        for _ in track([1], description="Converting..."):
+            convert_file(input_path, output_path)
 
-@app.command("inspect")
-def inspect_cmd(file: Annotated[Path, typer.Argument(help="BLN file to inspect")]) -> None:
-    """Inspect a BLN file and show coordinate information.
+        console.print(f"✓ Successfully converted to '{output_path}'", style="green")
 
-    Parses the BLN file and displays statistics about the coordinate
-    data, including point count and bounding box information.
-
-    Examples:
-        baloon inspect boundary.bln
-    """
-    if not file.exists():
-        console.print(f"[red]Error[/red]: File not found: {file}")
-        raise typer.Exit(1)
-
-    try:
-        records = parse_bln(file)
-    except BLNParseError as e:
-        console.print(f"[red]Parse error[/red]: {e}")
+    except BaloonError as e:
+        console.print(f"❌ Conversion error: {e}", style="red")
         raise typer.Exit(1) from e
+    except typer.Exit:
+        # Let Typer handle controlled exits without double-reporting
+        raise
     except Exception as e:
-        console.print(f"[red]Error[/red]: {e}")
-        raise typer.Exit(1) from e
-
-    # Calculate basic statistics
-    xs = [r.x for r in records]
-    ys = [r.y for r in records]
-
-    table = Table(title=f"BLN File Analysis: {file.name}")
-    table.add_column("Property", style="bold")
-    table.add_column("Value", style="cyan")
-
-    table.add_row("Point Count", str(len(records)))
-    table.add_row("Min X", f"{min(xs):.6f}")
-    table.add_row("Max X", f"{max(xs):.6f}")
-    table.add_row("Min Y", f"{min(ys):.6f}")
-    table.add_row("Max Y", f"{max(ys):.6f}")
-    table.add_row("Width", f"{max(xs) - min(xs):.6f}")
-    table.add_row("Height", f"{max(ys) - min(ys):.6f}")
-
-    console.print(table)
-
-    # Show first few points
-    if records:
-        console.print("\n[bold]First 5 coordinates:[/bold]")
-        coord_table = Table()
-        coord_table.add_column("Index", justify="right")
-        coord_table.add_column("X", justify="right")
-        coord_table.add_column("Y", justify="right")
-
-        for i, record in enumerate(records[:5]):
-            coord_table.add_row(str(i), f"{record.x:.6f}", f"{record.y:.6f}")
-
-        console.print(coord_table)
+        console.print(f"❌ Unexpected error: {e}", style="red")
+        raise typer.Exit(2) from e
 
 
 if __name__ == "__main__":

@@ -1,13 +1,18 @@
-"""Baloon: BLN polygon conversion toolkit (formerly blnconverter).
+"""Baloon: Modern geospatial vector format interconverter and CLI toolkit.
 
-Provides utilities to parse Golden Software / Surfer BLN files and convert them to
-common geospatial vector formats (Shapefile / GeoJSON).
+Provides utilities for bidirectional conversion between various geospatial vector formats
+including BLN (Golden Software), Shapefile, GeoJSON, KML, GeoPackage, and SVG formats.
+Designed for professional geospatial data workflows with a modern Python architecture.
 
-Backwards compatibility: importing `blnconverter` still works (shim module).
+Main capabilities:
+- Multi-format support: BLN, Shapefile, GeoJSON, KML, GeoPackage, SVG
+- Bidirectional conversion between supported formats
+- CLI toolkit with Rich-powered terminal interface
+- Python API for programmatic use
+- Extensible format registry system
 """
 
 __all__ = [
-    "BLNParseError",
     "BLNRecord",
     "convert_file",
     "convert_path",
@@ -17,5 +22,8 @@ __all__ = [
 
 __version__ = "2.1.0"
 
-from .core import BLNParseError, BLNRecord, convert_file, convert_path, parse_bln
+from .core import BLNRecord
+from .core import convert_file
+from .core import convert_path
+from .core import parse_bln
 from .formats import list_formats

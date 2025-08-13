@@ -1,189 +1,135 @@
 # Baloon 🎈
 
-> **Modern geospatial file converter** - Transform BLN polygon files into contemporary formats
+> **Geospatial vector format converter** - Transform between multiple geospatial formats
 
-[![Tests](https://github.com/your-username/baloon/workflows/Tests/badge.svg)](https://github.com/your-username/baloon/actions)
 [![PyPI version](https://badge.fury.io/py/baloon.svg)](https://pypi.org/project/baloon/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Code style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Baloon (formerly BLN-Converter) is a professional-grade command-line tool for converting geospatial polygon files between formats. Originally designed for legacy Golden Software BLN files, it has evolved into a modern, extensible converter supporting multiple vector formats.
+Baloon is a command-line tool and Python library for converting between geospatial vector formats. Convert BLN, Shapefile, GeoJSON, KML, GeoPackage, and SVG files quickly and easily.
 
-## ✨ Features
+## Features
 
-### Multi-Format Support
-- **Input formats**: BLN, Shapefile, GeoJSON
-- **Output formats**: Shapefile, GeoJSON, SVG (preview renderer)
-- **Extensible**: Plugin-style format registry for easy expansion
+- **Multiple formats**: BLN, Shapefile, GeoJSON, KML, GeoPackage, SVG
+- **Bidirectional conversion**: Convert from any input format to any output format  
+  - Note: BLN is read-only (source-only) and SVG is write-only (destination-only)
+- **Batch processing**: Convert entire directories at once (Python API)
+- **Command-line interface**: Simple command for quick conversions
+- **Python API**: Import and use in your scripts
 
-### Modern Architecture
-- **Type-safe**: Full native Python 3.10+ type annotations
-- **CLI excellence**: Beautiful Rich-powered terminal output
-- **Fast**: Efficient processing with GeoPandas backend
-- **Tested**: Comprehensive test coverage with pytest
-
-### Developer Experience
-- **Professional docs**: NumPy-style docstrings throughout
-- **Linting**: Ruff for consistent code quality
-- **CI/CD ready**: GitHub Actions integration
-- **Modern build**: Hatch + pyproject.toml configuration
-
-## 🚀 Installation
+## Installation
 
 ```bash
-# Using uv (recommended for modern Python development)
+# Using uv (recommended)
 uv add baloon
 
 # Using pip
 pip install baloon
-
-# From source (development)
-git clone https://github.com/your-username/baloon.git
-cd baloon
-pip install -e .
 ```
 
-## 💻 Usage
+## Usage
 
-### Command Line Interface
+### Command Line
 
-**Convert a single file to multiple formats:**
+Note: Options should be placed before positional arguments.
+
+**Convert single files:**
 ```bash
-baloon convert boundary.bln --to geojson svg
+uv run baloon input.bln output.geojson
+uv run baloon data.geojson output.shp
+uv run baloon --input-format bln --output-format geojson input.txt output.txt
+uv run baloon --overwrite input.bln output.geojson
 ```
 
-**Batch convert entire directories:**
+**Convert directories (recursive):**
 ```bash
-baloon batch ./data/ --to geojson --out ./converted/
+# Convert all supported readable files under ./data to GeoJSON in ./out-geojson
+uv run baloon --output-format geojson ./data ./out-geojson
+
+# Convert all supported readable files under ./project to Shapefile in ./out-shp
+uv run baloon --output-format shp ./project ./out-shp
 ```
 
-**Inspect BLN file contents:**
-```bash
-baloon inspect polygon.bln
-```
-
-**List all supported formats:**
-```bash
-baloon formats
-```
+Notes for directory conversions:
+- The output path must be a directory; it will be created if it does not exist.
+- Input formats are auto-detected per file. Unsupported formats and write-only inputs (e.g., SVG) are skipped with a warning.
+- The relative directory structure is preserved in the output.
+- Existing output files are overwritten.
 
 ### Python API
 
+**Quick conversions (any format → any format):**
 ```python
-from baloon import parse_bln, convert_file
-from pathlib import Path
+# uv run python -c "
+import baloon
 
-# Parse BLN coordinates
-records = parse_bln(Path("boundary.bln"))
-print(f"Found {len(records)} coordinate points")
+# Convert single file (auto-detects formats by extension)
+baloon.convert_file('input.bln', 'output.geojson')
+baloon.convert_file('data.geojson', 'boundaries.shp')
 
-# Convert between formats
-convert_file(
-    Path("input.bln"), 
-    Path("output.geojson")
-)
+# Explicitly specify formats when extensions are ambiguous
+# (BLN is read-only and SVG is write-only)
+baloon.convert_file('input.data', 'output.data')  # with flags via CLI only
+# "
 ```
 
-## 🏗️ Format Support
+**Batch convert directories (Python API):**
+```python
+# uv run python -c "
+import baloon
+
+# Convert all supported readable files in a directory to GeoJSON
+# - Preserves relative structure
+# - Skips write-only inputs (e.g., SVG)
+baloon.convert_path('./data/', 'geojson')
+# "
+```
+
+**Working with BLN data:**
+```python
+# uv run python -c "
+from baloon import parse_bln
+from pathlib import Path
+
+# Parse BLN file
+records = parse_bln(Path('boundary.bln'))
+print(f'Found {len(records)} coordinate points')
+
+# Access coordinates
+for record in records:
+    print(f'Point: {record.x}, {record.y}')
+# "
+```
+
+**Load any format as GeoDataFrame:**
+```python
+# uv run python -c "
+from baloon.formats import load_any
+from pathlib import Path
+
+# Load any supported format as GeoDataFrame
+gdf = load_any(Path('data.geojson'))  # or .shp, .kml, .gpkg, .bln
+print(f'Loaded {len(gdf)} features')
+print(gdf.head())
+# "
+```
+
+## Supported Formats
 
 | Format | Extension | Read | Write | Description |
 |--------|-----------|------|-------|-------------|
 | **BLN** | `.bln` | ✅ | ❌ | Golden Software polygon files |
 | **Shapefile** | `.shp` | ✅ | ✅ | ESRI standard with components |
 | **GeoJSON** | `.geojson`, `.json` | ✅ | ✅ | RFC 7946 feature collections |
-| **SVG** | `.svg` | ❌ | ✅ | Scalable vector graphics (preview) |
+| **KML** | `.kml` | ✅ | ✅ | Google Earth format |
+| **GeoPackage** | `.gpkg` | ✅ | ✅ | OGC SQLite-based format |
+| **SVG** | `.svg` | ❌ | ✅ | Scalable vector graphics |
 
-## 🔧 Development
+## Tips
 
-### Architecture Overview
-
-Baloon follows modern Python development practices:
-
-- **Core module** (`core.py`): BLN parsing and coordinate handling
-- **Format registry** (`formats.py`): Pluggable reader/writer system  
-- **CLI interface** (`cli.py`): Typer-based command line with Rich output
-- **Type safety**: Native Python 3.10+ union syntax (`str | None`)
-- **Documentation**: NumPy-style docstrings for all public APIs
-
-### Key Design Decisions
-
-1. **Format Registry Pattern**: Extensible plugin system for adding new formats
-2. **GeoPandas Integration**: Leverage proven geospatial libraries
-3. **Rich Terminal Output**: Professional CLI experience with tables and colors  
-4. **Native Type Annotations**: Modern Python type system without `__future__` imports
-5. **Comprehensive Testing**: Unit tests for parsing, conversion, and error handling
-
-### Contributing
-
-```bash
-# Set up development environment
-git clone https://github.com/your-username/baloon.git
-cd baloon
-python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Code formatting and linting
-ruff format .
-ruff check .
-
-# Type checking
-pyright
-```
-
-Verbosity levels:
-
-```bash
-baloon convert area.geojson -t shp -v    # info
-baloon convert area.geojson -t shp -vv   # debug
-```
-
-## Dependencies
-
-- [GeoPandas](https://geopandas.org)
-- [Typer](https://typer.tiangolo.com)
-- [Rich](https://github.com/Textualize/rich)
-- [Shapely](https://shapely.readthedocs.io)
-- [Fiona](https://fiona.readthedocs.io)
+- If your file has a non-standard extension, use CLI format flags:
+  - `uv run baloon --input-format bln --output-format geojson input.txt output.txt`
+- Use the Python API for batch conversions and programmatic workflows.
 
 ## License
 
 [MIT License](LICENSE)
-
-## Contributing
-
-Contributions welcome! This codebase follows a modern Python stack:
-
-* Packaging: `pyproject.toml` + Hatch build backend
-* Dependency management: `uv` (fast) or pip
-* CLI: Typer + Rich
-* Lint & Format: Ruff
-* Static typing: Pyright (strict) + native type hints
-* Tests: Pytest
-
-### Dev quickstart
-
-```bash
-uv venv
-source .venv/bin/activate
-uv sync --all-extras --dev
-pytest
-ruff check . && ruff format --check .
-pyright
-```
-
-### Pre-commit
-
-Install hooks (optional):
-
-```bash
-uv add --dev pre-commit
-pre-commit install
-```
-
-### Migration note (<=1.0.x)
-
-Previous package name `bln-converter` and commands remain available as shims; migrate to `baloon`.

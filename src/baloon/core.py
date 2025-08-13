@@ -1,44 +1,40 @@
 """Core geospatial data processing functionality for Baloon.
 
 This module provides the fundamental data structures and algorithms for parsing
-BLN polygon files and converting them to standard geospatial formats.
+various geospatial polygon files and converting them between standard formats.
+Supports BLN (Golden Software), Shapefile, GeoJSON, KML, GeoPackage, and SVG formats.
 
 Classes
 -------
 BLNRecord
     Represents a single coordinate point from a BLN file.
-BLNParseError
-    Exception raised when BLN file parsing fails.
 
 Functions
 ---------
 parse_bln
     Parse a BLN polygon file into coordinate records.
 convert_file
-    Convert a single BLN file to target format(s).
+    Convert between any supported geospatial formats.
 convert_path
-    Convert BLN file(s) from a path (file or directory).
-discover_bln
-    Discover BLN files matching a pattern in a directory tree.
+    Convert geospatial file(s) from a path (file or directory).
 
 Notes
 -----
-BLN (Golden Software) files contain polygon boundary data as coordinate pairs,
-typically used in geological and mining applications.
+While originally designed for BLN (Golden Software) files containing polygon
+boundary data used in geological and mining applications, this module now supports
+bidirectional conversion between multiple modern geospatial vector formats.
+
+All dependencies (GeoPandas, Shapely) are required and imported directly for
+fail-fast behavior. Semantic exceptions provide clear error messages.
 """
 
-import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 
-from shapely.geometry import Polygon
-from shapely.geometry.base import BaseGeometry
+from .exceptions import GeometryError
 
-try:  # geopandas runtime dependency
-    import geopandas as gpd
-except Exception:  # pragma: no cover
-    gpd = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -66,30 +62,6 @@ class BLNRecord:
 
     x: float
     y: float
-
-
-class BLNParseError(RuntimeError):
-    """Exception raised when BLN file parsing encounters unrecoverable errors.
-
-    This exception is raised when:
-    - File contains insufficient coordinate points (< 3 for polygon)
-    - File format is corrupted beyond recovery
-    - Required coordinate data is missing
-
-    Attributes
-    ----------
-    message : str
-        Human-readable error description.
-
-    Examples
-    --------
-    >>> try:
-    ...     parse_bln(Path("invalid.bln"))
-    ... except BLNParseError as e:
-    ...     print(f"Parse failed: {e}")
-    """
-
-    pass
 
 
 def _iter_lines(path: Path) -> Iterator[str]:
@@ -124,6 +96,11 @@ def parse_bln(path: Path) -> list[BLNRecord]:
     Parses Golden Software BLN format files, which contain polygon boundary
     data as coordinate pairs. Supports both comma and tab-separated values.
 
+    Assumes coordinates are geographic (longitude, latitude) in degrees
+    and validates that longitude is within [-180, 180] and latitude within
+    [-90, 90]. Lines with non-numeric values are ignored (treated as headers),
+    and out-of-range numeric coordinates are skipped as spurious values.
+
     Parameters
     ----------
     path : Path
@@ -136,32 +113,12 @@ def parse_bln(path: Path) -> list[BLNRecord]:
 
     Raises
     ------
-    BLNParseError
+    GeometryError
         If the file contains fewer than 3 valid coordinate pairs, which is
         insufficient to form a polygon.
-
-    Notes
-    -----
-    - Lines that cannot be parsed as coordinates are silently skipped
-    - Header lines with metadata are automatically ignored
-    - Both comma and tab separators are supported
-    - Minimum of 3 coordinate pairs required for valid polygon
-
-    Examples
-    --------
-    >>> from pathlib import Path
-    >>> # Create a simple square BLN file
-    >>> bln_content = "0,0\\n1,0\\n1,1\\n0,1\\n"
-    >>> bln_file = Path("square.bln")
-    >>> bln_file.write_text(bln_content)
-    >>> records = parse_bln(bln_file)
-    >>> len(records)
-    4
-    >>> records[0].x, records[0].y
-    (0.0, 0.0)
     """
     points: list[BLNRecord] = []
-    for line in _iter_lines(path):
+    for lineno, line in enumerate(_iter_lines(path), start=1):
         # BLN sometimes has header lines with counts; ignore if they don't parse.
         line = line.replace("\t", ",")
         parts = [p for p in line.split(",") if p]
@@ -171,80 +128,75 @@ def parse_bln(path: Path) -> list[BLNRecord]:
             x = float(parts[0])
             y = float(parts[1])
         except ValueError:
-            logger.debug("Skipping non-numeric line %s", line)
+            # Skip non-numeric lines silently (these are typically headers)
+            continue
+        # Validate longitude/latitude ranges; skip out-of-bounds points
+        if not (-180.0 <= x <= 180.0) or not (-90.0 <= y <= 90.0):
+            logger.debug(
+                "Skipping out-of-bounds coordinate at line %d in %s: x=%s, y=%s",
+                lineno,
+                path,
+                x,
+                y,
+            )
             continue
         points.append(BLNRecord(x, y))
     if len(points) < 3:
-        raise BLNParseError(f"Not enough coordinate lines in {path} (found {len(points)})")
+        raise GeometryError(
+            f"Polygon requires at least 3 coordinate points, found {len(points)} in {path}"
+        )
     return points
 
 
-def convert_file(bln_path: Path, output_path: Path) -> None:
-    """Convert a single BLN file to the specified format.
+def convert_file(input_path: Path, output_path: Path) -> None:
+    """Convert a single geospatial file to the specified format.
 
-    Determines the output format from the file extension and uses the
-    appropriate format handler for conversion.
+    Determines the input and output formats from file extensions and uses the
+    appropriate format handlers for conversion. Supports any readable format
+    registered in the format registry as input, and any writable format as
+    output. BLN is read-only (input only) and SVG is write-only (output only).
 
     Parameters
     ----------
-    bln_path : Path
-        Path to the source BLN file to convert.
+    input_path : Path
+        Path to the source file to convert (any supported readable format).
     output_path : Path
         Path where the converted file should be saved. The file extension
         determines the output format (e.g., .geojson, .shp, .svg).
 
     Raises
     ------
-    BLNParseError
-        If the BLN file cannot be parsed or has insufficient coordinate data.
-    RuntimeError
-        If the output format is not supported by any registered format handler.
-
-    Notes
-    -----
-    - Output format is auto-detected from the file extension
-    - Supports all formats registered in the format registry
-    - Intermediate conversion through Shapely Polygon for geometry operations
-
-    Examples
-    --------
-    >>> from pathlib import Path
-    >>> bln_file = Path("boundary.bln")
-    >>> geojson_file = Path("boundary.geojson")
-    >>> convert_file(bln_file, geojson_file)  # Converts to GeoJSON
-
-    >>> svg_file = Path("boundary.svg")
-    >>> convert_file(bln_file, svg_file)     # Converts to SVG
+    FileParsingError
+        If the input file cannot be parsed due to format/content issues.
+    FormatNotSupportedError
+        If the input or output format is not supported by any registered handler.
+    FormatReadOnlyError
+        If the output format is read-only and cannot be written to.
+    FormatWriteOnlyError
+        If the input format is write-only and cannot be read from (e.g., SVG).
     """
+    # Lazy imports to avoid circular dependencies with formats -> core
+    from .formats import load_any
     from .formats import write_any
 
-    points = parse_bln(bln_path)
-    coords = [(pt.x, pt.y) for pt in points]
-
-    from shapely import Polygon
-
-    geom = Polygon(coords)
-
-    # Convert to GeoDataFrame for format system
-    if gpd is None:  # pragma: no cover
-        raise RuntimeError("GeoPandas required for format conversion")
-    gdf = gpd.GeoDataFrame(index=[0], geometry=[geom], crs="EPSG:4326")
-
+    gdf = load_any(input_path)
     ext = output_path.suffix.lower().lstrip(".")
     write_any(gdf, output_path, ext)
 
 
-def convert_path(bln_path: Path, output_format: str, output_dir: Path | None = None) -> None:
-    """Convert BLN files with automatic output path generation.
+def convert_path(
+    input_path: Path, output_format: str, output_dir: Path | None = None
+) -> None:
+    """Convert geospatial file(s) with automatic output path generation.
 
     Batch conversion utility that handles both single files and directories.
-    Automatically generates output paths by replacing the .bln extension
-    with the specified format extension.
+    Automatically generates output paths by replacing the extension
+    with the specified target format extension.
 
     Parameters
     ----------
-    bln_path : Path
-        Source path - can be a single BLN file or directory containing BLN files.
+    input_path : Path
+        Source path - can be a single file or a directory containing files.
     output_format : str
         Target format extension (without dot), e.g., 'geojson', 'shp', 'svg'.
     output_dir : Path, optional
@@ -253,63 +205,46 @@ def convert_path(bln_path: Path, output_format: str, output_dir: Path | None = N
 
     Raises
     ------
-    BLNParseError
-        If any BLN file cannot be parsed or has insufficient coordinate data.
-    RuntimeError
-        If the specified output format is not supported.
     FileNotFoundError
         If the source path does not exist.
 
     Notes
     -----
-    - For single files: replaces .bln extension with target format
-    - For directories: processes all .bln files recursively
+    - For single files: replaces extension with target format
+    - For directories: processes all supported readable formats recursively
+      (skips write-only inputs like SVG)
     - Creates output directory if it doesn't exist
     - Preserves relative directory structure for batch processing
-
-    Examples
-    --------
-    >>> from pathlib import Path
-    >>> # Convert single file to GeoJSON in same directory
-    >>> convert_path(Path("data.bln"), "geojson")
-
-    >>> # Convert all BLN files in directory to SVG format
-    >>> source_dir = Path("boundaries/")
-    >>> output_dir = Path("svg_output/")
-    >>> convert_path(source_dir, "svg", output_dir)
     """
-    if bln_path.is_file():
+    if input_path.is_file():
         # Single file conversion
-        target_dir = output_dir if output_dir else bln_path.parent
+        target_dir = output_dir if output_dir else input_path.parent
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        output_path = target_dir / bln_path.with_suffix(f".{output_format}").name
-        convert_file(bln_path, output_path)
+        output_path = target_dir / input_path.with_suffix(f".{output_format}").name
+        convert_file(input_path, output_path)
 
-    elif bln_path.is_dir():
+    elif input_path.is_dir():
         # Directory batch conversion
-        target_dir = output_dir if output_dir else bln_path
+        target_dir = output_dir if output_dir else input_path
 
-        for bln_file in bln_path.glob("**/*.bln"):
-            rel_path = bln_file.relative_to(bln_path)
+        from .exceptions import FormatNotSupportedError
+        from .formats import detect_format
+
+        for file in input_path.glob("**/*"):
+            if not file.is_file():
+                continue
+            # Skip unsupported formats and write-only inputs (e.g., SVG)
+            try:
+                handler = detect_format(file)
+                if not handler.reader:
+                    continue
+            except FormatNotSupportedError:
+                continue
+
+            rel_path = file.relative_to(input_path)
             output_file = target_dir / rel_path.with_suffix(f".{output_format}")
-
             output_file.parent.mkdir(parents=True, exist_ok=True)
-            convert_file(bln_file, output_file)
+            convert_file(file, output_file)
     else:
-        raise FileNotFoundError(f"Source path does not exist: {bln_path}")
-
-
-# Legacy function for compatibility with formats module
-def _to_polygon(records: Sequence[BLNRecord]) -> BaseGeometry:
-    """Convert BLN records to a Shapely Polygon.
-
-    Helper function for the format system.
-    """
-    coords = [(r.x, r.y) for r in records]
-    if coords[0] != coords[-1]:
-        coords.append(coords[0])  # type: ignore[arg-type]
-    poly = Polygon(coords)
-    if not poly.is_valid:
-        poly = poly.buffer(0)
-    return poly
+        raise FileNotFoundError(f"Source path does not exist: {input_path}")

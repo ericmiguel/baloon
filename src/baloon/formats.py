@@ -1,33 +1,89 @@
 """Format registry for Baloon.
 
 Provides pluggable readers and writers for geospatial vector formats:
- - BLN (Golden Software) (read)
- - Shapefile (read/write via GeoPandas)
- - GeoJSON (read/write via GeoPandas)
- - GeoPackage (read/write via GeoPandas)
- - KML (write via fastkml, read via GeoPandas)
- - SVG (write only) simple 2D projection (no CRS transform)
+ - BLN (Golden Software) - read only
+ - Shapefile - read/write via GeoPandas
+ - GeoJSON - read/write via GeoPandas
+ - GeoPackage - read/write via GeoPandas
+ - KML - read/write via fastkml
+ - SVG - write only, 2D projection without CRS transform
 
-Additional formats can register via :func:`register_format`.
+Additional formats can be registered via :func:`register_format`.
 """
 
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 
+from fastkml import features
+from fastkml import geometry
+from fastkml import kml
 import geopandas as gpd
 from shapely.geometry import Polygon
 
-from .core import _to_polygon, parse_bln  # type: ignore
+from .core import BLNRecord
+from .core import parse_bln
+from .exceptions import FileParsingError
+from .exceptions import FormatNotSupportedError
+from .exceptions import FormatReadOnlyError
+from .exceptions import FormatWriteOnlyError
+from .exceptions import GeometryError
+from .exceptions import InsufficientDataError
 
-# Optional KML dependencies
-try:
-    from fastkml import kml, features
-    import pygeoif
-    KML_AVAILABLE = True
-except ImportError:
-    KML_AVAILABLE = False
+
+@dataclass
+class KMLGeometryChoice:
+    point: geometry.Point | None = None
+    linestring: geometry.LineString | None = None
+    polygon: geometry.Polygon | None = None
+    multigeometry: geometry.MultiGeometry | None = None
+
+    @property
+    def value(self) -> gpd.GeoDataFrame:
+        geom = None
+        for v in (self.point, self.linestring, self.polygon, self.multigeometry):
+            if v is not None:
+                geom = v
+                break
+        if geom is None:
+            raise GeometryError("No valid KML geometry found.")
+
+        # Convert fastkml geometry to shapely geometry
+        shapely_geom = geom.geometry if hasattr(geom, "geometry") else geom
+
+        # Return as single-row GeoDataFrame
+        return gpd.GeoDataFrame(index=[0], geometry=[shapely_geom], crs="EPSG:4326")
+
+
+def _to_polygon(records: list[BLNRecord]) -> Polygon:
+    """Convert BLN records to a Shapely Polygon.
+
+    Parameters
+    ----------
+    records : list
+        List of BLNRecord objects with x and y coordinates.
+
+    Returns
+    -------
+    Polygon
+        Shapely polygon created from the coordinate records.
+
+    Raises
+    ------
+    InsufficientDataError
+        If fewer than 3 coordinate pairs are provided.
+    """
+    if len(records) < 3:
+        raise InsufficientDataError(
+            "Cannot create polygon from coordinate records",
+            required=3,
+            found=len(records),
+        )
+
+    coordinates = [(record.x, record.y) for record in records]
+    return Polygon(coordinates)
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,32 +96,18 @@ class FormatHandler:
     particular format. Each handler specifies supported file extensions
     and provides optional reader/writer functions.
 
-    Attributes
+    Parameters
     ----------
     name : str
         Human-readable format name (e.g., 'GeoJSON', 'Shapefile').
     extensions : list[str]
         File extensions supported by this format (without dots).
-    reader : Callable[[Path], gpd.GeoDataFrame] or None
-        Function to read files in this format, or None if read-only.
-    writer : Callable[[gpd.GeoDataFrame, Path], None] or None
-        Function to write files in this format, or None if write-only.
-    description : str, optional
-        Detailed description of the format and its capabilities.
-
-    Examples
-    --------
-    >>> def read_custom(path):
-    ...     return gpd.read_file(path)
-    >>> def write_custom(gdf, path):
-    ...     gdf.to_file(path, driver='GPKG')
-    >>> handler = FormatHandler(
-    ...     name='GeoPackage',
-    ...     extensions=['gpkg'],
-    ...     reader=read_custom,
-    ...     writer=write_custom,
-    ...     description='SQLite-based geospatial format'
-    ... )
+    reader : callable or None
+        Function to read files in this format, signature: (Path) -> GeoDataFrame.
+    writer : callable or None
+        Function to write files in this format, signature: (GeoDataFrame, Path) -> None.
+    description : str, default ""
+        Description of the format and its capabilities.
     """
 
     name: str
@@ -81,32 +123,17 @@ _REGISTRY: dict[str, FormatHandler] = {}
 def register_format(handler: FormatHandler) -> None:
     """Register a new format handler in the global registry.
 
-    Adds support for a new geospatial file format by registering
-    reader/writer functions for the specified file extensions.
-
     Parameters
     ----------
     handler : FormatHandler
-        Complete format handler specification with name, extensions,
+        Format handler specification with name, extensions,
         and optional reader/writer functions.
 
     Notes
     -----
-    - Each extension will be mapped to the same handler instance
-    - Extension matching is case-insensitive
-    - Later registrations override earlier ones for same extensions
-
-    Examples
-    --------
-    >>> def read_kml(path):
-    ...     return gpd.read_file(path, driver='KML')
-    >>> kml_handler = FormatHandler(
-    ...     name='KML',
-    ...     extensions=['kml'],
-    ...     reader=read_kml,
-    ...     description='Keyhole Markup Language'
-    ... )
-    >>> register_format(kml_handler)
+    Each extension will be mapped to the same handler instance.
+    Extension matching is case-insensitive.
+    Later registrations override earlier ones for same extensions.
     """
     for ext in handler.extensions:
         _REGISTRY[ext.lower()] = handler
@@ -115,24 +142,15 @@ def register_format(handler: FormatHandler) -> None:
 def list_formats() -> list[FormatHandler]:
     """List all registered format handlers.
 
-    Returns unique format handlers sorted alphabetically by name.
-    Since multiple extensions can map to the same handler, this
-    function deduplicates the results.
-
     Returns
     -------
     list[FormatHandler]
-        All unique format handlers, sorted by name.
+        Unique format handlers sorted alphabetically by name.
 
-    Examples
-    --------
-    >>> formats = list_formats()
-    >>> for fmt in formats:
-    ...     print(f"{fmt.name}: {', '.join(fmt.extensions)}")
-    BLN: bln
-    GeoJSON: geojson
-    SVG: svg
-    Shapefile: shp
+    Notes
+    -----
+    Since multiple extensions can map to the same handler,
+    this function deduplicates the results.
     """
     seen = {}
     for h in _REGISTRY.values():
@@ -142,9 +160,6 @@ def list_formats() -> list[FormatHandler]:
 
 def detect_format(path: Path) -> FormatHandler:
     """Detect the format handler for a given file path.
-
-    Uses the file extension to lookup the appropriate format handler
-    from the registry.
 
     Parameters
     ----------
@@ -158,27 +173,17 @@ def detect_format(path: Path) -> FormatHandler:
 
     Raises
     ------
-    ValueError
+    FormatNotSupportedError
         If the file extension is not supported by any registered handler.
-
-    Examples
-    --------
-    >>> from pathlib import Path
-    >>> handler = detect_format(Path('data.geojson'))
-    >>> handler.name
-    'GeoJSON'
     """
     ext = path.suffix.lower().lstrip(".")
     if ext not in _REGISTRY:
-        raise ValueError(f"Unsupported / unknown format for '{path.name}'.")
+        raise FormatNotSupportedError(ext, str(path))
     return _REGISTRY[ext]
 
 
 def load_any(path: Path) -> gpd.GeoDataFrame:
     """Load geospatial data from any supported format.
-
-    Automatically detects the file format and uses the appropriate
-    reader function to load the data into a GeoDataFrame.
 
     Parameters
     ----------
@@ -192,26 +197,21 @@ def load_any(path: Path) -> gpd.GeoDataFrame:
 
     Raises
     ------
-    ValueError
-        If the file format is not supported or is write-only.
-
-    Examples
-    --------
-    >>> from pathlib import Path
-    >>> gdf = load_any(Path('boundaries.geojson'))
-    >>> print(f"Loaded {len(gdf)} features")
+    FormatNotSupportedError
+        If the file format is not supported by any registered handler.
+    FormatWriteOnlyError
+        If the file format is write-only and cannot be read.
+    FileParsingError
+        If the file cannot be parsed due to format or content issues.
     """
     handler = detect_format(path)
     if not handler.reader:
-        raise ValueError(f"Format '{handler.name}' is write-only.")
+        raise FormatWriteOnlyError(handler.name, str(path))
     return handler.reader(path)
 
 
 def write_any(gdf: gpd.GeoDataFrame, out_path: Path, target_ext: str) -> None:
     """Write geospatial data to any supported format.
-
-    Uses the specified file extension to determine the output format
-    and applies the appropriate writer function.
 
     Parameters
     ----------
@@ -224,19 +224,17 @@ def write_any(gdf: gpd.GeoDataFrame, out_path: Path, target_ext: str) -> None:
 
     Raises
     ------
-    ValueError
-        If the target format is not supported or is read-only.
-
-    Examples
-    --------
-    >>> import geopandas as gpd
-    >>> from pathlib import Path
-    >>> gdf = gpd.read_file('input.geojson')
-    >>> write_any(gdf, Path('output.shp'), 'shp')
+    FormatNotSupportedError
+        If the target format is not supported by any registered handler.
+    FormatReadOnlyError
+        If the target format is read-only and cannot be written to.
     """
+    # Create parent directory if it doesn't exist
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
     handler = _REGISTRY.get(target_ext.lower())
     if not handler or not handler.writer:
-        raise ValueError(f"No writer for format '{target_ext}'.")
+        raise FormatReadOnlyError(target_ext, str(out_path))
     handler.writer(gdf, out_path)
 
 
@@ -246,9 +244,6 @@ def write_any(gdf: gpd.GeoDataFrame, out_path: Path, target_ext: str) -> None:
 def _read_bln(path: Path) -> gpd.GeoDataFrame:
     """Read BLN polygon file into GeoDataFrame.
 
-    Internal reader function that parses BLN coordinate data and
-    converts it to a single-polygon GeoDataFrame with WGS84 CRS.
-
     Parameters
     ----------
     path : Path
@@ -257,7 +252,8 @@ def _read_bln(path: Path) -> gpd.GeoDataFrame:
     Returns
     -------
     gpd.GeoDataFrame
-        Single-feature GeoDataFrame containing the polygon geometry.
+        Single-feature GeoDataFrame containing the polygon geometry
+        with WGS84 CRS (EPSG:4326).
     """
     records = parse_bln(path)
     poly = _to_polygon(records)  # type: ignore[arg-type]
@@ -266,9 +262,6 @@ def _read_bln(path: Path) -> gpd.GeoDataFrame:
 
 def _write_vector(gdf: gpd.GeoDataFrame, out_path: Path) -> None:
     """Write GeoDataFrame to standard vector format.
-
-    Internal writer function supporting Shapefile and GeoJSON formats
-    via GeoPandas with automatic driver detection.
 
     Parameters
     ----------
@@ -285,15 +278,12 @@ def _write_vector(gdf: gpd.GeoDataFrame, out_path: Path) -> None:
     ext = out_path.suffix.lower().lstrip(".")
     driver = {"shp": "ESRI Shapefile", "geojson": "GeoJSON"}.get(ext)
     if not driver:
-        raise ValueError(f"Unsupported driver for extension '{ext}'.")
+        raise FormatNotSupportedError(ext, str(out_path))
     gdf.to_file(out_path, driver=driver)
 
 
 def _read_vector(path: Path) -> gpd.GeoDataFrame:
     """Read standard vector file into GeoDataFrame.
-
-    Internal reader function that delegates to GeoPandas for
-    automatic format detection and loading.
 
     Parameters
     ----------
@@ -310,231 +300,200 @@ def _read_vector(path: Path) -> gpd.GeoDataFrame:
 
 def _read_geopackage(path: Path) -> gpd.GeoDataFrame:
     """Read GeoPackage file into GeoDataFrame.
-    
-    Internal reader function for SQLite-based GeoPackage format.
-    If multiple layers exist, reads the first layer by default.
-    
+
     Parameters
     ----------
     path : Path
-        Path to the GeoPackage (.gpkg) file to read.
-        
+        Path to the GeoPackage file.
+
     Returns
     -------
     gpd.GeoDataFrame
-        Loaded geospatial data from the GeoPackage.
-        
-    Notes
-    -----
-    - Uses GDAL GPKG driver through GeoPandas
-    - For multi-layer packages, only reads the first layer
-    - Supports all OGC GeoPackage features including CRS metadata
+        Loaded geospatial data.
     """
-    return gpd.read_file(path, driver='GPKG')
+    return gpd.read_file(path, driver="GPKG")
 
 
-def _write_geopackage(gdf: gpd.GeoDataFrame, out_path: Path) -> None:
-    """Write GeoDataFrame to GeoPackage format.
-    
-    Internal writer function for SQLite-based GeoPackage files.
-    Creates a single layer with the same name as the file stem.
-    
+def _write_geopackage(gdf: gpd.GeoDataFrame, path: Path) -> None:
+    """Write GeoDataFrame to GeoPackage file.
+
     Parameters
     ----------
     gdf : gpd.GeoDataFrame
-        Geospatial data to write.
-    out_path : Path
-        Output GeoPackage (.gpkg) file path.
-        
-    Notes
-    -----
-    - Uses GDAL GPKG driver through GeoPandas
-    - Creates single layer named after the file
-    - Preserves CRS information and attributes
-    - Overwrites existing files
+        The GeoDataFrame to write.
+    path : Path
+        Path where the GeoPackage file should be created.
     """
-    layer_name = out_path.stem
-    gdf.to_file(out_path, driver='GPKG', layer=layer_name)
+    gdf.to_file(path, driver="GPKG")
 
 
 def _read_kml(path: Path) -> gpd.GeoDataFrame:
     """Read KML file into GeoDataFrame.
-    
-    Internal reader function for Keyhole Markup Language files.
-    Uses GeoPandas with fallback to manual parsing if needed.
-    
+
     Parameters
     ----------
     path : Path
         Path to the KML file to read.
-        
+
     Returns
     -------
     gpd.GeoDataFrame
         Loaded geospatial data from KML.
-        
-    Notes
-    -----
-    - First attempts GeoPandas reading (requires GDAL KML driver)
-    - Falls back to direct KML parsing if GeoPandas fails
-    - May not preserve all KML styling information
+
+    Raises
+    ------
+    FileParsingError
+        If KML reading fails due to malformed content or parsing errors.
+    InsufficientDataError
+        If the KML file contains no valid geometries.
     """
+    # Always use manual KML parsing to avoid GDAL dependency issues
+    geometries = []
+    names = []
+    descriptions = []
+
     try:
-        # Try GeoPandas first (works if GDAL has KML support)
-        return gpd.read_file(path)
-    except Exception:
-        # Fallback: manual KML parsing (if fastkml is available)
-        if not KML_AVAILABLE:
-            raise RuntimeError("KML support requires fastkml and pygeoif packages")
-        
-        # Import KML libraries (conditional import)
-        from fastkml import kml, features
-        
-        # Basic KML reading - extract geometries and attributes
-        logger.warning("Using basic KML parser - some features may be lost")
-        geometries = []
-        names = []
-        descriptions = []
-        
-        with path.open('r', encoding='utf-8') as f:
+        with path.open("r", encoding="utf-8") as f:
+            content = f.read()
+            # Remove XML declaration if present (fastkml doesn't like it)
+            if content.startswith("<?xml"):
+                content = content.split(">", 1)[1] if ">" in content else content
             k = kml.KML()
-            k.from_string(f.read())
-            
-            # Extract geometries from all placemarks  
-            # Handle nested structure - documents and folders can contain placemarks
-            def extract_placemarks(container):
-                """Recursively extract placemarks from KML containers."""
-                for item in container.features:
-                    if isinstance(item, features.Placemark) and hasattr(item, 'kml_geometry') and item.kml_geometry:
-                        # pygeoif geometries are already Shapely-compatible
-                        geometries.append(item.kml_geometry)
-                        names.append(item.name or f"Feature_{len(geometries)}")
-                        descriptions.append(item.description or "")
-                    elif hasattr(item, 'features'):
-                        # Recurse into folders/documents
-                        extract_placemarks(item)
-            
-            extract_placemarks(k)
-        
-        if not geometries:
-            # Return empty GeoDataFrame with geometry column
-            return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-            
-        # Create GeoDataFrame with extracted data
-        data = {'name': names, 'description': descriptions}
-        return gpd.GeoDataFrame(data, geometry=geometries, crs="EPSG:4326")
+            k.from_string(content)
+    except Exception as e:
+        raise FileParsingError(
+            message=f"Failed to parse KML file: {e}", path=str(path)
+        ) from e
+
+    # Extract geometries from all placemarks
+    def extract_placemarks(container: object) -> None:
+        """Recursively extract placemarks from KML containers."""
+        if not hasattr(container, "features"):
+            return
+        for item in container.features:
+            if (
+                isinstance(item, features.Placemark)
+                and hasattr(item, "kml_geometry")
+                and item.kml_geometry
+            ):
+                # pygeoif geometries are already Shapely-compatible
+                geometries.append(item.kml_geometry)
+                names.append(item.name or f"Feature_{len(geometries)}")
+                descriptions.append(item.description or "")
+            elif hasattr(item, "features"):
+                # Recurse into folders/documents
+                extract_placemarks(item)
+
+    extract_placemarks(k)
+
+    if not geometries:
+        raise InsufficientDataError(
+            message=f"No valid geometries found in KML file '{path}'",
+            required=1,
+            found=0,
+            path=str(path),
+        )
+
+    # Create GeoDataFrame with extracted data
+    data = {"name": names, "description": descriptions}
+    return gpd.GeoDataFrame(data, geometry=geometries, crs="EPSG:4326")
 
 
 def _write_kml(gdf: gpd.GeoDataFrame, out_path: Path) -> None:
     """Write GeoDataFrame to KML format.
-    
-    Internal writer function for Keyhole Markup Language files.
-    Based on the provided script, modernized for GeoPandas input.
-    
+
     Parameters
     ----------
     gdf : gpd.GeoDataFrame
-        Geospatial data to write.
+        The GeoDataFrame to write.
     out_path : Path
-        Output KML file path.
-        
-    Notes
-    -----
-    - Uses fastkml and pygeoif libraries
-    - Creates placemarks for each feature
-    - Basic styling and naming support
-    - Requires fastkml and pygeoif dependencies
+        Path where the KML file should be created.
     """
-    if not KML_AVAILABLE:
-        raise RuntimeError("KML export requires fastkml and pygeoif packages")
-    
-    # Import KML libraries (conditional import)
-    from fastkml import kml, features, geometry
-    
     # Create KML document structure
     k = kml.KML()
     # Use Document (it exists in the API despite linter warnings)
     doc = kml.Document(name=out_path.stem, description="Generated by Baloon")  # type: ignore
     k.append(doc)
-    
+
     # Convert each row to a KML Placemark
     for idx, row in gdf.iterrows():
         if row.geometry is None or row.geometry.is_empty:
             continue
-            
+
         # Create placemark name (use index if no name column)
         placemark_name = f"Feature_{idx}"
-        if 'name' in gdf.columns and row['name']:
-            placemark_name = str(row['name'])
-        elif 'Name' in gdf.columns and row['Name']:
-            placemark_name = str(row['Name'])
-        
+        if "name" in gdf.columns and row["name"]:
+            placemark_name = str(row["name"])
+        elif "Name" in gdf.columns and row["Name"]:
+            placemark_name = str(row["Name"])
+
         # Create description from other attributes
         description_parts = []
         for col in gdf.columns:
-            if col not in ['geometry', 'name', 'Name'] and row[col] is not None:
+            if col not in ["geometry", "name", "Name"] and row[col] is not None:
                 description_parts.append(f"{col}: {row[col]}")
-        description = "; ".join(description_parts) if description_parts else "No description"
-        
+        description = (
+            "; ".join(description_parts) if description_parts else "No description"
+        )
+
         # Convert Shapely geometry to fastkml geometry
         try:
             # Create appropriate fastkml geometry based on Shapely geometry type
             shapely_geom = row.geometry
             geom_type = shapely_geom.geom_type
-            
-            if geom_type == "Point":
-                kml_geom = geometry.Point(geometry=shapely_geom)
-            elif geom_type == "LineString":
-                kml_geom = geometry.LineString(geometry=shapely_geom)
-            elif geom_type == "Polygon":
-                kml_geom = geometry.Polygon(geometry=shapely_geom)
-            elif geom_type == "MultiPoint":
-                kml_geom = geometry.MultiGeometry(geometry=shapely_geom)
-            elif geom_type == "MultiLineString":
-                kml_geom = geometry.MultiGeometry(geometry=shapely_geom)
-            elif geom_type == "MultiPolygon":
-                kml_geom = geometry.MultiGeometry(geometry=shapely_geom)
-            else:
-                logger.warning(f"Unsupported geometry type {geom_type} for feature {idx}")
-                continue
-            
+
+            geom_type_map = {
+                "Point": lambda g: KMLGeometryChoice(point=geometry.Point(geometry=g)),
+                "LineString": lambda g: KMLGeometryChoice(
+                    linestring=geometry.LineString(geometry=g)
+                ),
+                "Polygon": lambda g: KMLGeometryChoice(
+                    polygon=geometry.Polygon(geometry=g)
+                ),
+                "MultiPoint": lambda g: KMLGeometryChoice(
+                    multigeometry=geometry.MultiGeometry(geometry=g)
+                ),
+                "MultiLineString": lambda g: KMLGeometryChoice(
+                    multigeometry=geometry.MultiGeometry(geometry=g)
+                ),
+                "MultiPolygon": lambda g: KMLGeometryChoice(
+                    multigeometry=geometry.MultiGeometry(geometry=g)
+                ),
+            }
+
+            if geom_type not in geom_type_map:
+                raise GeometryError(
+                    f"Unsupported geometry type '{geom_type}' for feature {idx}"
+                )
+
+            kml_geom = geom_type_map[geom_type](shapely_geom).value
+
             # Create placemark with geometry
             pm = features.Placemark(
-                name=placemark_name,
-                description=description,
-                kml_geometry=kml_geom
+                name=placemark_name, description=description, kml_geometry=kml_geom
             )
             doc.append(pm)
         except Exception as e:
-            logger.warning(f"Failed to convert geometry for feature {idx}: {e}")
-            continue
-    
+            raise GeometryError(
+                f"Failed to convert geometry for feature {idx}: {e}"
+            ) from e
+
     # Write KML to file
-    xml_content = '<?xml version="1.0" encoding="UTF-8"?>\n' + k.to_string(prettyprint=True)
-    out_path.write_text(xml_content, encoding='utf-8')
+    xml_content = '<?xml version="1.0" encoding="UTF-8"?>\n' + k.to_string(
+        prettyprint=True
+    )
+    out_path.write_text(xml_content, encoding="utf-8")
 
 
 def _write_svg(gdf: gpd.GeoDataFrame, out_path: Path) -> None:
-    """Write GeoDataFrame geometries to simple SVG format.
-
-    Internal writer function that creates a basic 2D SVG representation
-    of polygon geometries. Uses a simple orthographic projection with
-    automatic scaling to fit an 800px wide viewport.
+    """Write GeoDataFrame to SVG format.
 
     Parameters
     ----------
     gdf : gpd.GeoDataFrame
-        Geospatial data containing Polygon or MultiPolygon geometries.
+        The GeoDataFrame to write.
     out_path : Path
-        Output SVG file path.
-
-    Notes
-    -----
-    - Only supports Polygon and MultiPolygon geometries
-    - Uses black stroke with no fill styling
-    - Y-axis is flipped for standard SVG coordinate system
-    - No CRS transformation is performed
-    - Scale is determined by the data bounds
+        Path where the SVG file should be created.
     """
     minx, miny, maxx, maxy = gdf.total_bounds
     width = max(1.0, maxx - minx)
@@ -547,14 +506,16 @@ def _write_svg(gdf: gpd.GeoDataFrame, out_path: Path) -> None:
         coords = list(poly.exterior.coords)
         d = (
             "M "
-            + " L ".join(f"{(x - minx) * scale:.2f},{(maxy - y) * scale:.2f}" for x, y in coords)
+            + " L ".join(
+                f"{(x - minx) * scale:.2f},{(maxy - y) * scale:.2f}" for x, y in coords
+            )
             + " Z"
         )
         return f"<path d=\"{d}\" fill='none' stroke='black' stroke-width='1' />"
 
     paths: list[str] = []
     for geom in gdf.geometry:
-        if geom is None:
+        if geom.is_empty:
             continue
         if geom.geom_type == "Polygon":
             paths.append(_poly_to_path(geom))  # type: ignore[arg-type]
@@ -562,10 +523,14 @@ def _write_svg(gdf: gpd.GeoDataFrame, out_path: Path) -> None:
             for pg in geom.geoms:  # type: ignore[attr-defined]
                 paths.append(_poly_to_path(pg))
         else:
-            logger.debug("Skipping unsupported geometry in SVG export: %s", geom.geom_type)
+            raise GeometryError(
+                f"SVG export only supports Polygon and MultiPolygon geometries, "
+                f"found: {geom.geom_type}"
+            )
 
     svg = [
-        f"<svg xmlns='http://www.w3.org/2000/svg' width='{svg_width}' height='{svg_height}' viewBox='0 0 {svg_width} {svg_height}'>",
+        f"<svg xmlns='http://www.w3.org/2000/svg' width='{svg_width}' "
+        f"height='{svg_height}' viewBox='0 0 {svg_width} {svg_height}'>",
         *paths,
         "</svg>",
     ]
@@ -624,14 +589,12 @@ register_format(
     )
 )
 
-# Register KML format conditionally
-if KML_AVAILABLE:
-    register_format(
-        FormatHandler(
-            name="KML",
-            extensions=["kml", "kmz"],
-            reader=_read_kml,
-            writer=_write_kml,
-            description="Keyhole Markup Language (Google Earth format)",
-        )
+register_format(
+    FormatHandler(
+        name="KML",
+        extensions=["kml", "kmz"],
+        reader=_read_kml,
+        writer=_write_kml,
+        description="Keyhole Markup Language (Google Earth format)",
     )
+)

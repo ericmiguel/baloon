@@ -19,4 +19,4 @@ jobs:
             - name: Type check (Pyright)
               run: uv run pyright
             - name: Tests
-              run: uv run pytest -q --cov=src/blnconverter --cov-report=term-missing
+              run: uv run pytest -q --cov=src/baloon --cov-report=term-missing
