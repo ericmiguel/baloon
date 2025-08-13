@@ -143,7 +143,8 @@ def parse_bln(path: Path) -> list[BLNRecord]:
         points.append(BLNRecord(x, y))
     if len(points) < 3:
         raise GeometryError(
-            f"Polygon requires at least 3 coordinate points, found {len(points)} in {path}"
+            "Polygon requires at least 3 coordinate points, found "
+            f"{len(points)} in {path}"
         )
     return points
 
@@ -248,3 +249,22 @@ def convert_path(
             convert_file(file, output_file)
     else:
         raise FileNotFoundError(f"Source path does not exist: {input_path}")
+
+
+# --- Simple user-facing aliases ---------------------------------------------
+
+def convert(input_path: Path, output_path: Path) -> None:
+    """Convert a single file. Alias of convert_file for convenience."""
+    convert_file(input_path, output_path)
+
+
+def convert_dir(
+    input_path: Path, output_format: str, output_dir: Path | None = None
+) -> None:
+    """Convert files in a directory (recursive). Alias of convert_path."""
+    convert_path(input_path, output_format, output_dir)
+
+
+def read_bln(path: Path) -> list[BLNRecord]:
+    """Parse a BLN file. Alias of parse_bln for convenience."""
+    return parse_bln(path)
