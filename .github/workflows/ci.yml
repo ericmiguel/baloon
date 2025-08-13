@@ -1,0 +1,22 @@
+name: CI
+
+on:
+    push:
+        branches: [main, develop]
+    pull_request:
+        branches: [main, develop]
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: astral-sh/setup-uv@v3
+            - name: Sync dependencies
+              run: uv sync --all-extras --dev
+            - name: Lint (Ruff)
+              run: uv run ruff check .
+            - name: Type check (Pyright)
+              run: uv run pyright
+            - name: Tests
+              run: uv run pytest -q --cov=src/blnconverter --cov-report=term-missing
