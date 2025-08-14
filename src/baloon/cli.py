@@ -17,6 +17,7 @@ from baloon.core import convert_file
 from baloon.exceptions import BaloonError
 from baloon.exceptions import FormatNotSupportedError
 from baloon.formats import detect_format
+from . import __version__
 
 
 app = typer.Typer(
@@ -28,6 +29,13 @@ app = typer.Typer(
     context_settings={"ignore_unknown_options": False},
 )
 console = Console()
+
+
+def _version_callback(value: bool) -> None:
+    """Print version and exit early when --version is provided."""
+    if value:
+        console.print(__version__)
+        raise typer.Exit(code=0)
 
 
 @app.callback(invoke_without_command=True)
@@ -59,6 +67,16 @@ def main(
     overwrite: Annotated[
         bool,
         typer.Option("--overwrite", help="Overwrite output file if it exists"),
+    ] = False,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Show version and exit",
+            callback=_version_callback,
+            is_eager=True,
+        ),
     ] = False,
 ) -> None:
     """Convert a geospatial file from one format to another.
