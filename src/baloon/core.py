@@ -144,8 +144,31 @@ def parse_bln(path: Path) -> list[BLNRecord]:
     return points
 
 
-def convert_file(input_path: Path, output_path: Path) -> None:
-    """Convert a single geospatial file to the specified format.
+def _unlink_shp_sidecars(target_path: Path) -> None:
+    """Remove common Shapefile sidecar files."""
+    stem = target_path.with_suffix("")
+    sidecars = [
+        ".shp",
+        ".shx",
+        ".dbf",
+        ".prj",
+        ".cpg",
+        ".sbn",
+        ".sbx",
+        ".qix",
+        ".fix",
+    ]
+    for s in sidecars:
+        p = Path(f"{stem}{s}")
+        if p.exists():
+            p.unlink(missing_ok=True)
+
+
+def convert_file(
+    input_path: Path, output_path: Path, *, overwrite: bool = False
+) -> None:
+    """
+    Convert a single geospatial file to the specified format.
 
     Determines the input and output formats from file extensions and uses the
     appropriate format handlers for conversion. Supports any readable format
@@ -175,13 +198,33 @@ def convert_file(input_path: Path, output_path: Path) -> None:
     from .formats import load_any
     from .formats import write_any
 
-    gdf = load_any(input_path)
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Input path '{input_path}' is not a file.")
+
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Output file '{output_path}' already exists.")
+
+    # Handle overwrite: remove existing outputs when requested
     ext = output_path.suffix.lower().lstrip(".")
+    try:
+        if ext == "shp":
+            _unlink_shp_sidecars(output_path)
+        else:
+            output_path.unlink(missing_ok=True)
+    except Exception as e:
+        raise RuntimeError(f"Failed to remove existing '{output_path}': {e}") from e
+
+    gdf = load_any(input_path)
+
     write_any(gdf, output_path, ext)
 
 
 def convert_path(
-    input_path: Path, output_format: str, output_dir: Path | None = None
+    input_path: Path,
+    output_format: str,
+    output_dir: Path | None = None,
+    *,
+    overwrite: bool = False,
 ) -> None:
     """
     Convert geospatial file(s) with automatic output path generation.
@@ -219,7 +262,7 @@ def convert_path(
         target_dir.mkdir(parents=True, exist_ok=True)
 
         output_path = target_dir / input_path.with_suffix(f".{output_format}").name
-        convert_file(input_path, output_path)
+        convert_file(input_path, output_path, overwrite=overwrite)
 
     elif input_path.is_dir():
         # Directory batch conversion
@@ -242,7 +285,7 @@ def convert_path(
             rel_path = file.relative_to(input_path)
             output_file = target_dir / rel_path.with_suffix(f".{output_format}")
             output_file.parent.mkdir(parents=True, exist_ok=True)
-            convert_file(file, output_file)
+            convert_file(file, output_file, overwrite=overwrite)
     else:
         raise FileNotFoundError(f"Source path does not exist: {input_path}")
 
@@ -250,16 +293,20 @@ def convert_path(
 # --- Simple user-facing aliases ---------------------------------------------
 
 
-def convert(input_path: Path, output_path: Path) -> None:
+def convert(input_path: Path, output_path: Path, *, overwrite: bool = False) -> None:
     """Convert a single file. Alias of convert_file for convenience."""
-    convert_file(input_path, output_path)
+    convert_file(input_path, output_path, overwrite=overwrite)
 
 
 def convert_dir(
-    input_path: Path, output_format: str, output_dir: Path | None = None
+    input_path: Path,
+    output_format: str,
+    output_dir: Path | None = None,
+    *,
+    overwrite: bool = False,
 ) -> None:
     """Convert files in a directory (recursive). Alias of convert_path."""
-    convert_path(input_path, output_format, output_dir)
+    convert_path(input_path, output_format, output_dir, overwrite=overwrite)
 
 
 def read_bln(path: Path) -> list[BLNRecord]:

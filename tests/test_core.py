@@ -174,6 +174,14 @@ class TestConvertFile:
         assert nested_output.exists()
         assert nested_output.parent.exists()
 
+    def test_convert_overwrite_protection(self, bln_file: Path, tmp_path: Path) -> None:
+        """Test that conversion does not overwrite existing output file."""
+        output_file = tmp_path / "output.geojson"
+        output_file.write_text("existing content")
+
+        with pytest.raises(FileExistsError):
+            convert_file(bln_file, output_file)
+
     def test_convert_overwrites_existing_output(
         self, bln_file: Path, tmp_path: Path
     ) -> None:
@@ -181,7 +189,7 @@ class TestConvertFile:
         output_file = tmp_path / "output.geojson"
         output_file.write_text("existing content")
 
-        convert_file(bln_file, output_file)
+        convert_file(bln_file, output_file, overwrite=True)
 
         content = output_file.read_text()
         assert "existing content" not in content

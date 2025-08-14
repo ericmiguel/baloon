@@ -15,6 +15,10 @@ import typer
 
 from baloon.core import convert_file
 from baloon.exceptions import BaloonError
+from baloon.exceptions import FormatNotSupportedError
+from baloon.formats import detect_format
+
+from . import __version__
 
 
 app = typer.Typer(
@@ -26,6 +30,13 @@ app = typer.Typer(
     context_settings={"ignore_unknown_options": False},
 )
 console = Console()
+
+
+def _version_callback(value: bool) -> None:
+    """Print version and exit early when --version is provided."""
+    if value:
+        console.print(__version__)
+        raise typer.Exit(code=0)
 
 
 @app.callback(invoke_without_command=True)
@@ -58,17 +69,30 @@ def main(
         bool,
         typer.Option("--overwrite", help="Overwrite output file if it exists"),
     ] = False,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Show version and exit",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
 ) -> None:
-    """Convert a geospatial file from one format to another.
+    """
+    Convert a geospatial file from one format to another.
 
-    Supports BLN (read-only), Shapefile, GeoJSON, KML, GeoPackage (GPKG), and SVG (write-only).
+    Supports BLN (read-only), Shapefile, GeoJSON, KML,
+    GeoPackage (GPKG) and SVG (write-only).
     """
     try:
         # Directory batch conversion path
         if input_path.is_dir():
             if output_format is None:
                 console.print(
-                    "❌ When input is a directory, please specify --output-format (e.g., geojson).",
+                    "❌ When input is a directory, please specify "
+                    "--output-format (e.g., geojson).",
                     style="red",
                 )
                 raise typer.Exit(2)
@@ -76,17 +100,14 @@ def main(
             target_dir = output_path
             if target_dir.exists() and not target_dir.is_dir():
                 console.print(
-                    f"❌ Output path '{target_dir}' must be a directory when converting a folder.",
+                    f"❌ Output path '{target_dir}' must be a directory "
+                    "when converting a folder.",
                     style="red",
                 )
                 raise typer.Exit(2)
             target_dir.mkdir(parents=True, exist_ok=True)
 
             # Pre-scan files to warn and build conversion list
-            from baloon.exceptions import (
-                FormatNotSupportedError as FormatNotSupportedError,
-            )
-            from baloon.formats import detect_format as _detect_format
 
             files_to_convert: list[tuple[Path, Path]] = []
             unsupported_count = 0
@@ -96,7 +117,7 @@ def main(
                 if not file.is_file():
                     continue
                 try:
-                    handler = _detect_format(file)
+                    handler = detect_format(file)
                 except FormatNotSupportedError:
                     unsupported_count += 1
                     console.print(
@@ -121,14 +142,19 @@ def main(
                 return
 
             console.print(
-                f"Converting directory '{input_path}' to '{output_format}' into '{target_dir}'..."
+                f"Converting directory '{input_path}' to "
+                f"'{output_format}' into '{target_dir}'..."
             )
 
             for src, dst in track(files_to_convert, description="Converting..."):
-                convert_file(src, dst)
+                if overwrite:
+                    convert_file(src, dst, overwrite=True)
+                else:
+                    convert_file(src, dst)
 
             console.print(
-                f"✓ Successfully converted {len(files_to_convert)} file(s) to '{target_dir}'",
+                f"✓ Successfully converted {len(files_to_convert)} "
+                f"file(s) to '{target_dir}'",
                 style="green",
             )
             return
@@ -142,54 +168,51 @@ def main(
             )
             raise typer.Exit(2)
 
-        # Detect formats if not specified
         if input_format is None:
             try:
-                from baloon.formats import detect_format as _detect_format
-
-                handler = _detect_format(input_path)
+                handler = detect_format(input_path)
                 input_format = handler.name
                 console.print(f"Detected input format: {input_format}")
-            except Exception as e:
-                from baloon.exceptions import (
-                    FormatNotSupportedError as FormatNotSupportedError,
-                )
-
-                if isinstance(e, FormatNotSupportedError):
-                    console.print(f"❌ Unsupported input format: {e}", style="red")
-                    raise typer.Exit(2) from e
+            except FormatNotSupportedError as e:
+                console.print(f"❌ Unsupported input format: {e}", style="red")
+                raise typer.Exit(2) from e
+            except Exception:
                 raise
 
         if output_format is None:
             try:
-                from baloon.formats import detect_format as _detect_format
-
-                handler = _detect_format(output_path)
+                handler = detect_format(output_path)
                 output_format = handler.name
                 console.print(f"Detected output format: {output_format}")
-            except Exception as e:
-                from baloon.exceptions import (
-                    FormatNotSupportedError as FormatNotSupportedError,
-                )
-
-                if isinstance(e, FormatNotSupportedError):
-                    console.print(f"❌ Unsupported output format: {e}", style="red")
-                    raise typer.Exit(2) from e
+            except FormatNotSupportedError as e:
+                console.print(f"❌ Unsupported output format: {e}", style="red")
+                raise typer.Exit(2) from e
+            except Exception:
                 raise
 
         # Perform conversion with progress tracking
         console.print(
-            f"Converting '{input_path}' ({input_format}) to '{output_path}' ({output_format})..."
+            f"Converting '{input_path}' ({input_format}) to "
+            f"'{output_path}' ({output_format})..."
         )
 
         for _ in track([1], description="Converting..."):
-            convert_file(input_path, output_path)
+            if overwrite:
+                convert_file(input_path, output_path, overwrite=True)
+            else:
+                convert_file(input_path, output_path)
 
-        console.print(f"✓ Successfully converted to '{output_path}'", style="green")
+        console.print(f"✓ Successfully converted '{output_path}'", style="green")
 
     except BaloonError as e:
         console.print(f"❌ Conversion error: {e}", style="red")
         raise typer.Exit(1) from e
+    except FileNotFoundError as e:
+        console.print(
+            f"❌ No such file or directory: '{input_path}'",
+            style="red",
+        )
+        raise typer.Exit(2) from e
     except typer.Exit:
         # Let Typer handle controlled exits without double-reporting
         raise

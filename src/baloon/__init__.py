@@ -24,7 +24,7 @@ __all__ = [
     "list_formats",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 from .core import BLNRecord
 from .core import convert

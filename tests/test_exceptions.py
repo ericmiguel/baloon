@@ -264,7 +264,9 @@ class TestCoordinateSystemError:
 class TestExceptionHierarchy:
     """Test exception hierarchy and relationships."""
 
-    def test_all_exceptions_inherit_from_baloon_error(self, all_exceptions: list[type[BaloonError]]) -> None:
+    def test_all_exceptions_inherit_from_baloon_error(
+        self, all_exceptions: list[type[BaloonError]]
+    ) -> None:
         """Test that all custom exceptions inherit from BaloonError."""
         for exception_class in all_exceptions:
             if exception_class != BaloonError:
