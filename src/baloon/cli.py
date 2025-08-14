@@ -15,6 +15,8 @@ import typer
 
 from baloon.core import convert_file
 from baloon.exceptions import BaloonError
+from baloon.exceptions import FormatNotSupportedError
+from baloon.formats import detect_format
 
 
 app = typer.Typer(
@@ -83,10 +85,6 @@ def main(
             target_dir.mkdir(parents=True, exist_ok=True)
 
             # Pre-scan files to warn and build conversion list
-            from baloon.exceptions import (
-                FormatNotSupportedError as FormatNotSupportedError,
-            )
-            from baloon.formats import detect_format as _detect_format
 
             files_to_convert: list[tuple[Path, Path]] = []
             unsupported_count = 0
@@ -96,7 +94,7 @@ def main(
                 if not file.is_file():
                     continue
                 try:
-                    handler = _detect_format(file)
+                    handler = detect_format(file)
                 except FormatNotSupportedError:
                     unsupported_count += 1
                     console.print(
@@ -145,16 +143,10 @@ def main(
         # Detect formats if not specified
         if input_format is None:
             try:
-                from baloon.formats import detect_format as _detect_format
-
-                handler = _detect_format(input_path)
+                handler = detect_format(input_path)
                 input_format = handler.name
                 console.print(f"Detected input format: {input_format}")
             except Exception as e:
-                from baloon.exceptions import (
-                    FormatNotSupportedError as FormatNotSupportedError,
-                )
-
                 if isinstance(e, FormatNotSupportedError):
                     console.print(f"❌ Unsupported input format: {e}", style="red")
                     raise typer.Exit(2) from e
@@ -162,16 +154,10 @@ def main(
 
         if output_format is None:
             try:
-                from baloon.formats import detect_format as _detect_format
-
-                handler = _detect_format(output_path)
+                handler = detect_format(output_path)
                 output_format = handler.name
                 console.print(f"Detected output format: {output_format}")
             except Exception as e:
-                from baloon.exceptions import (
-                    FormatNotSupportedError as FormatNotSupportedError,
-                )
-
                 if isinstance(e, FormatNotSupportedError):
                     console.print(f"❌ Unsupported output format: {e}", style="red")
                     raise typer.Exit(2) from e
